@@ -12,6 +12,11 @@
 //!   best to repair the text and layout.
 //! * [`ClaudeClient::correct_to_target`] — same connection, but the caller
 //!   passes a [`FormatTarget`] describing the shape the output should take.
+//!
+//! This is a reusable module; some of its public surface (e.g. `with_model`,
+//! `OutputFormat::Markdown`) isn't exercised by the demo binary, so dead-code
+//! analysis for the binary target is suppressed here.
+#![allow(dead_code)]
 
 use serde::Serialize;
 
@@ -158,10 +163,11 @@ Return only the result, with no preamble or commentary.\n\n\
 }
 
 /// The output format the corrected text should take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
     /// Plain prose, no markup.
+    #[default]
     PlainText,
     /// Markdown with headings, lists, emphasis as appropriate.
     Markdown,
@@ -198,12 +204,6 @@ pub struct FormatTarget {
     pub examples: Vec<String>,
     /// Optional tone/voice guidance.
     pub tone: Option<String>,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        OutputFormat::PlainText
-    }
 }
 
 impl FormatTarget {

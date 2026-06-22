@@ -2,12 +2,11 @@
 //!
 //! Stage 1 ([`normalize::regex_repair`]) always runs — it is offline and free.
 //! Stages 2 and 3 (the agent corrections) only run when `ANTHROPIC_API_KEY`
-//! is set, since they hit the Claude API.
+//! is set, since they hit the Claude API. The key is read from the environment
+//! or a local `.env` file.
 
-mod agent;
-mod normalize;
-
-use agent::{ClaudeClient, FormatTarget, OutputFormat};
+use agent_text_cleanup::agent::{ClaudeClient, FormatTarget, OutputFormat};
+use agent_text_cleanup::normalize;
 
 const SAMPLE: &str = "March 9th\n\
 Wea week! ory Doctors\n\n\
@@ -17,6 +16,9 @@ Negation: I will not be ruled by distraction.";
 
 #[tokio::main]
 async fn main() {
+    // Load ANTHROPIC_API_KEY from a local .env if present (ignored if absent).
+    let _ = dotenvy::dotenv();
+
     // Stage 1: regex + heuristics (always available).
     let cleaned = normalize::regex_repair(SAMPLE);
     println!("=== Stage 1: regex_repair ===\n{cleaned}\n");

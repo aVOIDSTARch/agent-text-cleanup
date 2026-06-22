@@ -14,15 +14,17 @@ use std::sync::LazyLock;
 static DEHYPHENATE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\w)-\n(\w)").unwrap());
 
 /// Merge a soft line break where a lowercase letter (or opening punctuation)
-/// continues the sentence, leaving real sentence-ending breaks alone.
+/// continues the sentence, leaving real sentence-ending breaks and blank-line
+/// paragraph boundaries alone (the preceding char must not itself be a newline).
 static SOFT_BREAK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new("([^.!?:\"])\n([a-z(\"])").unwrap());
+    LazyLock::new(|| Regex::new("([^.!?:\"\n])\n([a-z(\"])").unwrap());
 
 /// Collapse three or more newlines down to a single paragraph boundary.
 static BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
-/// Collapse runs of spaces/tabs within a line to a single space.
-static INNER_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]{2,}").unwrap());
+/// Collapse runs of spaces/tabs within a line to a single space (also folds a
+/// lone tab into a space).
+static INNER_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+").unwrap());
 
 /// Trim trailing spaces/tabs at the end of each line.
 static TRAILING_SPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)[ \t]+$").unwrap());
@@ -46,8 +48,10 @@ pub fn regex_repair(raw: &str) -> String {
     let mut text = raw.replace("\r\n", "\n").replace('\r', "\n");
 
     text = DEHYPHENATE.replace_all(&text, "$1$2").into_owned();
-    text = SOFT_BREAK.replace_all(&text, "$1 $2").into_owned();
+    // Strip stray-symbol lines while line structure is still intact, so a
+    // garbage line can't be merged into the next good line by SOFT_BREAK.
     text = STRAY_SYMBOLS.replace_all(&text, "").into_owned();
+    text = SOFT_BREAK.replace_all(&text, "$1 $2").into_owned();
     text = BLANK_LINES.replace_all(&text, "\n\n").into_owned();
     text = INNER_SPACES.replace_all(&text, " ").into_owned();
     text = TRAILING_SPACE.replace_all(&text, "").into_owned();
