@@ -2,4 +2,5 @@
 .env
 /token-usage.json
 /token-usage.json.tmp
+/token-report.md
 

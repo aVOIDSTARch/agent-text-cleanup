@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use crate::token;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -186,7 +186,7 @@ Return only the result, with no preamble or commentary.\n\n\
 }
 
 /// The output format the corrected text should take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
     /// Plain prose, no markup.
@@ -213,7 +213,11 @@ impl OutputFormat {
 /// This replaces the hard-coded schema the original TypeScript baked in: the
 /// caller now describes the target generically, and [`describe`](FormatTarget::describe)
 /// renders the non-empty fields into a prompt block.
-#[derive(Debug, Clone, Default, Serialize)]
+///
+/// Deserializable from a JSON file (the "OutputFormat" file) so callers can keep
+/// reusable targets on disk; missing fields fall back to their defaults.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct FormatTarget {
     /// What the content is, and what it should become.
     pub description: String,

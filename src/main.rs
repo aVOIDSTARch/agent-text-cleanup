@@ -1,84 +1,15 @@
-//! Demo entry point for the OCR text-cleanup pipeline.
+//! Binary entry point: parse the CLI and dispatch.
 //!
-//! Stage 1 ([`normalize::regex_repair`]) always runs — it is offline and free.
-//! Stages 2 and 3 (the agent corrections) only run when `ANTHROPIC_API_KEY`
-//! is set, since they hit the Claude API. The key is read from the environment
-//! or a local `.env` file.
+//! All behavior lives in the library modules (see `cli.rs`); this is just the
+//! thin shell that loads `.env`, parses arguments, and returns an exit code.
 
-use agent_text_cleanup::agent::{ClaudeClient, FormatTarget, OutputFormat};
-use agent_text_cleanup::{normalize, token};
-
-const SAMPLE: &str = "March 9th\n\
-Wea week! ory Doctors\n\n\
-The   power of atten-\ntion is the most\nimportant skill we can culti-\nvate.\n\n\
-~^*#@eae garbage line\n\n\
-Negation: I will not be ruled by distraction.";
+use agent_text_cleanup::cli::{self, Cli};
+use clap::Parser;
+use std::process::ExitCode;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     // Load ANTHROPIC_API_KEY from a local .env if present (ignored if absent).
     let _ = dotenvy::dotenv();
-
-    // Stage 1: regex + heuristics (always available).
-    let cleaned = normalize::regex_repair(SAMPLE);
-    println!("=== Stage 1: regex_repair ===\n{cleaned}\n");
-
-    // Stages 2 & 3 need an API key.
-    let client = match ClaudeClient::from_env() {
-        Ok(client) => client,
-        Err(_) => {
-            println!("(set ANTHROPIC_API_KEY to run the agent correction stages)");
-            return;
-        }
-    };
-
-    // Stage 2: agent correction, no formatting guidance.
-    match client.correct(&cleaned).await {
-        Ok(corrected) => println!("=== Stage 2: agent correct ===\n{corrected}\n"),
-        Err(e) => eprintln!("stage 2 failed: {e}"),
-    }
-
-    // Stage 3: agent correction toward a format/design target.
-    let target = FormatTarget {
-        description: "a single daily meditation entry with a date, a theme title, body text, \
-            and a closing negation line"
-            .to_string(),
-        output_format: OutputFormat::Json,
-        schema: Some(
-            r#"{ "date": "string", "theme": "string", "body": "string", "negation": "string" }"#
-                .to_string(),
-        ),
-        layout_notes: Some("one JSON object; correct the garbled theme title from context".to_string()),
-        ..Default::default()
-    };
-    match client.correct_to_target(&cleaned, &target).await {
-        Ok(structured) => println!("=== Stage 3: agent correct_to_target ===\n{structured}"),
-        Err(e) => eprintln!("stage 3 failed: {e}"),
-    }
-
-    // Report token spend recorded by the agent calls above: this month and
-    // all time. Per-event nodes are in the log file itself.
-    match token::read_log(token::DEFAULT_LOG_PATH) {
-        Ok(log) => {
-            let month = log.this_month();
-            let all = &log.all_time;
-            println!(
-                "\n=== Token usage ===\n\
-                 this month: {} requests, {} in / {} out ({} total)\n\
-                 all time:   {} requests, {} in / {} out ({} total)\n\
-                 ({} events logged in {})",
-                month.requests,
-                month.input_tokens,
-                month.output_tokens,
-                month.total_tokens(),
-                all.requests,
-                all.input_tokens,
-                all.output_tokens,
-                all.total_tokens(),
-                log.events.len(),
-                token::DEFAULT_LOG_PATH,
-            );
-        }
-        Err(e) => eprintln!("could not read token log: {e}"),
-    }
+    cli::run(Cli::parse()).await
 }

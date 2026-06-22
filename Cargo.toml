@@ -12,3 +12,4 @@ regex = "1"
 thiserror = "2"
 dotenvy = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
