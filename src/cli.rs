@@ -12,7 +12,7 @@ use crate::segmentation::{self, BatchMode, SegmentConfig};
 use crate::{agent::ClaudeClient, normalize, report, token};
 use clap::{Args, Parser, Subcommand};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -60,8 +60,9 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct NormalizeArgs {
-    /// Input file to normalize, or `-` for stdin.
-    pub input: PathBuf,
+    /// Input file to normalize, or `-` for stdin. Omit it to read piped stdin,
+    /// so `... | agent-text-cleanup normalize` works.
+    pub input: Option<PathBuf>,
     /// Write the result here instead of stdout.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
@@ -69,8 +70,8 @@ pub struct NormalizeArgs {
 
 #[derive(Debug, Args)]
 pub struct CorrectArgs {
-    /// Markdown/text files to correct. Use a single `-` to read stdin.
-    #[arg(required = true)]
+    /// Markdown/text files to correct. Use `-` for stdin, or omit to read piped
+    /// stdin, so `agent-text-cleanup normalize foo.md | ... correct` works.
     pub inputs: Vec<PathBuf>,
 
     /// JSON FormatTarget ("OutputFormat") file describing the desired shape.
@@ -97,8 +98,8 @@ pub struct CorrectArgs {
 
 #[derive(Debug, Args)]
 pub struct SegmentArgs {
-    /// Markdown/text files to segment and correct. Use a single `-` for stdin.
-    #[arg(required = true)]
+    /// Markdown/text files to segment and correct. Use `-` for stdin, or omit to
+    /// read piped stdin.
     pub inputs: Vec<PathBuf>,
 
     /// JSON FormatTarget ("OutputFormat") file describing the desired shape.
@@ -155,6 +156,8 @@ pub struct UsageArgs {
 enum CliError {
     #[error("{0}")]
     Io(#[from] io::Error),
+    #[error("no input given: pass a file (or `-`), or pipe text on stdin")]
+    NoInput,
     #[error(transparent)]
     Api(#[from] api::ApiError),
     #[error(transparent)]
@@ -187,7 +190,8 @@ pub async fn run(cli: Cli) -> ExitCode {
 }
 
 fn cmd_normalize(args: NormalizeArgs) -> Result<(), CliError> {
-    let input = read_input(&args.input)?;
+    let source = resolve_input(args.input)?;
+    let input = read_input(&source)?;
     let cleaned = normalize::regex_repair(&input);
     write_output(args.output.as_deref(), &cleaned)
 }
@@ -209,10 +213,11 @@ async fn cmd_correct(args: CorrectArgs) -> Result<(), CliError> {
     // In unsupervised mode, inputs larger than one segment's budget are routed
     // through split → batch → recompile with the default settings.
     let seg_cfg = SegmentConfig::default();
-    let to_stdout = args.stdout || args.output_dir.is_none() && is_stdin(&args.inputs);
-    let multiple = args.inputs.len() > 1;
+    let inputs = resolve_inputs(args.inputs)?;
+    let to_stdout = args.stdout || args.output_dir.is_none() && is_stdin(&inputs);
+    let multiple = inputs.len() > 1;
 
-    for input in &args.inputs {
+    for input in &inputs {
         let markdown = read_input(input)?;
         let too_large = args.unsupervised
             && segmentation::estimate_tokens_heuristic(&markdown, &seg_cfg) > seg_cfg.max_tokens;
@@ -247,10 +252,11 @@ async fn cmd_segment(args: SegmentArgs) -> Result<(), CliError> {
         ..Default::default()
     };
 
-    let to_stdout = args.stdout || args.output_dir.is_none() && is_stdin(&args.inputs);
-    let multiple = args.inputs.len() > 1;
+    let inputs = resolve_inputs(args.inputs)?;
+    let to_stdout = args.stdout || args.output_dir.is_none() && is_stdin(&inputs);
+    let multiple = inputs.len() > 1;
 
-    for input in &args.inputs {
+    for input in &inputs {
         let recompiled = if is_stdin_path(input) {
             let markdown = read_stdin()?;
             segmentation::run(&client, &markdown, &cfg, args.batch_mode, target.as_ref()).await?
@@ -330,6 +336,29 @@ fn cmd_usage(args: UsageArgs) -> Result<(), CliError> {
 
 fn is_stdin_path(path: &Path) -> bool {
     path == Path::new("-")
+}
+
+/// Resolve a single optional input: the given path, or stdin (`-`) when none was
+/// given and stdin is piped. Errors if nothing was given and stdin is a terminal.
+fn resolve_input(input: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    match input {
+        Some(path) => Ok(path),
+        None if !io::stdin().is_terminal() => Ok(PathBuf::from("-")),
+        None => Err(CliError::NoInput),
+    }
+}
+
+/// Resolve an input list: the given paths, or a single stdin (`-`) entry when
+/// none were given and stdin is piped. Lets `... | <cmd>` work without an
+/// explicit `-`. Errors if nothing was given and stdin is a terminal.
+fn resolve_inputs(inputs: Vec<PathBuf>) -> Result<Vec<PathBuf>, CliError> {
+    if !inputs.is_empty() {
+        Ok(inputs)
+    } else if !io::stdin().is_terminal() {
+        Ok(vec![PathBuf::from("-")])
+    } else {
+        Err(CliError::NoInput)
+    }
 }
 
 fn is_stdin(inputs: &[PathBuf]) -> bool {
