@@ -6,6 +6,8 @@
 //! * [`token`] — local, on-disk tracking of token usage across API calls.
 //! * [`report`] — render a Markdown report from the token log using a template.
 //! * [`api`] — programmatic correction surface (markdown in, corrected out).
+//! * [`segmentation`] — split a large markdown file into token-bounded segments,
+//!   correct them as a batch, and recompile the pieces into one document.
 //! * [`cli`] — the command-line interface, backed by the modules above.
 //!
 //! These modules are exposed as a library so they can be driven from the
@@ -16,4 +18,5 @@ pub mod api;
 pub mod cli;
 pub mod normalize;
 pub mod report;
+pub mod segmentation;
 pub mod token;

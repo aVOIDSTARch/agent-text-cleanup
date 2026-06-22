@@ -8,6 +8,7 @@
 //! programmatic surface share one code path.
 
 use crate::api::{self, CorrectionApi};
+use crate::segmentation::{self, BatchMode, SegmentConfig};
 use crate::{agent::ClaudeClient, normalize, report, token};
 use clap::{Args, Parser, Subcommand};
 use std::fs;
@@ -38,6 +39,14 @@ pub enum Command {
     /// `--target <FILE>` (a JSON "OutputFormat"/FormatTarget file) it shapes the
     /// output to match that target. Multiple inputs are corrected in turn.
     Correct(CorrectArgs),
+
+    /// Split large markdown files into token-bounded segments, correct them as a
+    /// batch, and recompile the pieces into one document.
+    ///
+    /// Use this for files too big to correct in a single call. `--batch-mode
+    /// batches` (default) submits one Anthropic Message Batch; `collection`
+    /// corrects each segment with an ordinary sequential call.
+    Segment(SegmentArgs),
 
     /// Render a token-usage report from a Markdown template.
     ///
@@ -79,6 +88,46 @@ pub struct CorrectArgs {
     /// Override the model (default: claude-opus-4-8).
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
+
+    /// Run unattended: automatically segment any input larger than the default
+    /// token budget (split → batch → recompile) instead of failing or truncating.
+    #[arg(long)]
+    pub unsupervised: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SegmentArgs {
+    /// Markdown/text files to segment and correct. Use a single `-` for stdin.
+    #[arg(required = true)]
+    pub inputs: Vec<PathBuf>,
+
+    /// JSON FormatTarget ("OutputFormat") file describing the desired shape.
+    #[arg(short, long, value_name = "FILE")]
+    pub target: Option<PathBuf>,
+
+    /// Per-segment token budget.
+    #[arg(long, value_name = "N", default_value_t = segmentation::DEFAULT_MAX_TOKENS)]
+    pub max_tokens: usize,
+
+    /// How to estimate segment token counts.
+    #[arg(long, value_enum, default_value = "heuristic")]
+    pub estimator: segmentation::Estimator,
+
+    /// How to run the segments through the API.
+    #[arg(long, value_enum, default_value = "batches")]
+    pub batch_mode: BatchMode,
+
+    /// Write recompiled files into this directory (keeping their base names).
+    #[arg(short = 'd', long, value_name = "DIR", conflicts_with = "stdout")]
+    pub output_dir: Option<PathBuf>,
+
+    /// Print recompiled output to stdout instead of writing files.
+    #[arg(long)]
+    pub stdout: bool,
+
+    /// Override the model (default: claude-opus-4-8).
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +158,8 @@ enum CliError {
     #[error(transparent)]
     Api(#[from] api::ApiError),
     #[error(transparent)]
+    Segmentation(#[from] segmentation::SegmentationError),
+    #[error(transparent)]
     Agent(#[from] crate::agent::AgentError),
     #[error(transparent)]
     Report(#[from] report::ReportError),
@@ -122,6 +173,7 @@ pub async fn run(cli: Cli) -> ExitCode {
     let result = match cli.command {
         Command::Normalize(args) => cmd_normalize(args),
         Command::Correct(args) => cmd_correct(args).await,
+        Command::Segment(args) => cmd_segment(args).await,
         Command::Report(args) => cmd_report(args),
         Command::Usage(args) => cmd_usage(args),
     };
@@ -145,7 +197,8 @@ async fn cmd_correct(args: CorrectArgs) -> Result<(), CliError> {
     if let Some(model) = &args.model {
         client = client.with_model(model);
     }
-    let surface = CorrectionApi::new(client);
+    // The surface owns its client; keep a clone for the segmentation fallback.
+    let surface = CorrectionApi::new(client.clone());
 
     // Load the optional target once and reuse it for every input.
     let target = match &args.target {
@@ -153,35 +206,86 @@ async fn cmd_correct(args: CorrectArgs) -> Result<(), CliError> {
         None => None,
     };
 
+    // In unsupervised mode, inputs larger than one segment's budget are routed
+    // through split → batch → recompile with the default settings.
+    let seg_cfg = SegmentConfig::default();
     let to_stdout = args.stdout || args.output_dir.is_none() && is_stdin(&args.inputs);
     let multiple = args.inputs.len() > 1;
 
     for input in &args.inputs {
-        let corrected = if is_stdin_path(input) {
-            let markdown = read_stdin()?;
-            surface.correct_markdown(&markdown, target.as_ref()).await?
-        } else {
-            surface
-                .correct_markdown_file(input, target.as_ref())
+        let markdown = read_input(input)?;
+        let too_large = args.unsupervised
+            && segmentation::estimate_tokens_heuristic(&markdown, &seg_cfg) > seg_cfg.max_tokens;
+
+        let corrected = if too_large {
+            eprintln!("segmenting {} (exceeds token budget)", input.display());
+            segmentation::run(&client, &markdown, &seg_cfg, BatchMode::default(), target.as_ref())
                 .await?
-                .corrected
+        } else {
+            surface.correct_markdown(&markdown, target.as_ref()).await?
         };
 
-        if to_stdout {
-            if multiple {
-                println!("==> {} <==", input.display());
-            }
-            print_text(&corrected)?;
+        write_corrected(input, &corrected, to_stdout, multiple, args.output_dir.as_deref())?;
+    }
+    Ok(())
+}
+
+async fn cmd_segment(args: SegmentArgs) -> Result<(), CliError> {
+    let mut client = ClaudeClient::from_env()?;
+    if let Some(model) = &args.model {
+        client = client.with_model(model);
+    }
+
+    let target = match &args.target {
+        Some(path) => Some(api::load_target(path)?),
+        None => None,
+    };
+
+    let cfg = SegmentConfig {
+        max_tokens: args.max_tokens,
+        estimator: args.estimator,
+        ..Default::default()
+    };
+
+    let to_stdout = args.stdout || args.output_dir.is_none() && is_stdin(&args.inputs);
+    let multiple = args.inputs.len() > 1;
+
+    for input in &args.inputs {
+        let recompiled = if is_stdin_path(input) {
+            let markdown = read_stdin()?;
+            segmentation::run(&client, &markdown, &cfg, args.batch_mode, target.as_ref()).await?
         } else {
-            let out_path = output_path_for(input, args.output_dir.as_deref());
-            if let Some(parent) = out_path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(&out_path, &corrected)?;
-            eprintln!("corrected {} -> {}", input.display(), out_path.display());
+            segmentation::run_file(&client, input, &cfg, args.batch_mode, target.as_ref()).await?
+        };
+
+        write_corrected(input, &recompiled, to_stdout, multiple, args.output_dir.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Write a corrected/recompiled document to stdout or to a file beside (or under)
+/// the input, mirroring the layout used by both `correct` and `segment`.
+fn write_corrected(
+    input: &Path,
+    corrected: &str,
+    to_stdout: bool,
+    multiple: bool,
+    output_dir: Option<&Path>,
+) -> Result<(), CliError> {
+    if to_stdout {
+        if multiple {
+            println!("==> {} <==", input.display());
         }
+        print_text(corrected)?;
+    } else {
+        let out_path = output_path_for(input, output_dir);
+        if let Some(parent) = out_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&out_path, corrected)?;
+        eprintln!("corrected {} -> {}", input.display(), out_path.display());
     }
     Ok(())
 }
