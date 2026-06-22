@@ -6,7 +6,7 @@
 //! or a local `.env` file.
 
 use agent_text_cleanup::agent::{ClaudeClient, FormatTarget, OutputFormat};
-use agent_text_cleanup::normalize;
+use agent_text_cleanup::{normalize, token};
 
 const SAMPLE: &str = "March 9th\n\
 Wea week! ory Doctors\n\n\
@@ -54,5 +54,31 @@ async fn main() {
     match client.correct_to_target(&cleaned, &target).await {
         Ok(structured) => println!("=== Stage 3: agent correct_to_target ===\n{structured}"),
         Err(e) => eprintln!("stage 3 failed: {e}"),
+    }
+
+    // Report token spend recorded by the agent calls above: this month and
+    // all time. Per-event nodes are in the log file itself.
+    match token::read_log(token::DEFAULT_LOG_PATH) {
+        Ok(log) => {
+            let month = log.this_month();
+            let all = &log.all_time;
+            println!(
+                "\n=== Token usage ===\n\
+                 this month: {} requests, {} in / {} out ({} total)\n\
+                 all time:   {} requests, {} in / {} out ({} total)\n\
+                 ({} events logged in {})",
+                month.requests,
+                month.input_tokens,
+                month.output_tokens,
+                month.total_tokens(),
+                all.requests,
+                all.input_tokens,
+                all.output_tokens,
+                all.total_tokens(),
+                log.events.len(),
+                token::DEFAULT_LOG_PATH,
+            );
+        }
+        Err(e) => eprintln!("could not read token log: {e}"),
     }
 }

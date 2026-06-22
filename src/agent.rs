@@ -18,7 +18,9 @@
 //! analysis for the binary target is suppressed here.
 #![allow(dead_code)]
 
+use crate::token;
 use serde::Serialize;
+use std::path::PathBuf;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -55,15 +57,18 @@ pub struct ClaudeClient {
     http: reqwest::Client,
     api_key: String,
     model: String,
+    token_log_path: PathBuf,
 }
 
 impl ClaudeClient {
-    /// Build a client with an explicit API key, defaulting to [`DEFAULT_MODEL`].
+    /// Build a client with an explicit API key, defaulting to [`DEFAULT_MODEL`]
+    /// and the default token-log path ([`token::DEFAULT_LOG_PATH`]).
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
             model: DEFAULT_MODEL.to_string(),
+            token_log_path: PathBuf::from(token::DEFAULT_LOG_PATH),
         }
     }
 
@@ -77,6 +82,14 @@ impl ClaudeClient {
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// Override where token usage is logged (defaults to
+    /// [`token::DEFAULT_LOG_PATH`] in the working directory).
+    #[must_use]
+    pub fn with_token_log(mut self, path: impl Into<PathBuf>) -> Self {
+        self.token_log_path = path.into();
         self
     }
 
@@ -94,7 +107,7 @@ line and paragraph layout, and remove obvious OCR artifacts — but do not inven
 change the meaning. Return only the corrected text, with no preamble or commentary.\n\n\
 --- BEGIN TEXT ---\n{text}\n--- END TEXT ---"
         );
-        self.send_messages(prompt).await
+        self.send_messages(prompt, "correct").await
     }
 
     /// Correct OCR-damaged text toward a specific format/design target.
@@ -117,11 +130,14 @@ Return only the result, with no preamble or commentary.\n\n\
 --- BEGIN TEXT ---\n{text}\n--- END TEXT ---",
             target_block = target.describe(),
         );
-        self.send_messages(prompt).await
+        self.send_messages(prompt, "correct_to_target").await
     }
 
     /// The single shared API path both public methods route through.
-    async fn send_messages(&self, prompt: String) -> Result<String, AgentError> {
+    ///
+    /// `operation` labels the recorded token event so the on-disk log shows
+    /// which call (freeform vs. target-guided) spent the tokens.
+    async fn send_messages(&self, prompt: String, operation: &str) -> Result<String, AgentError> {
         let request = MessagesRequest {
             model: &self.model,
             max_tokens: DEFAULT_MAX_TOKENS,
@@ -151,6 +167,13 @@ Return only the result, with no preamble or commentary.\n\n\
         }
 
         let parsed: MessagesResponse = response.json().await?;
+
+        // Record a token event to the local log. A logging failure must not
+        // sink an otherwise-successful correction, so warn rather than error.
+        if let Err(e) = token::record(&self.token_log_path, &self.model, operation, &parsed.usage) {
+            eprintln!("warning: failed to record token usage: {e}");
+        }
+
         parsed
             .content
             .into_iter()
@@ -254,6 +277,8 @@ struct Message {
 #[derive(serde::Deserialize)]
 struct MessagesResponse {
     content: Vec<ContentBlock>,
+    #[serde(default)]
+    usage: token::Usage,
 }
 
 /// A content block in the response. We only care about `text`; everything else
