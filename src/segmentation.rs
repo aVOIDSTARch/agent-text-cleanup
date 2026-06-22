@@ -1,0 +1,1 @@
+// This file is a library that take a full sized markdown file and breaks it down into a collection of text to fit the max token limit set in the api and formats it fro batch processing and then recompiles the output into a markdown file 
